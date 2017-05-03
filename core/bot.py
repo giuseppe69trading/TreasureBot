@@ -48,7 +48,6 @@ class Bot:
     WE have to well define this class
     """
     def step(self, state):
-        
         for i in range(0, self.n_Stock):
             self.virtual[i] = self.position[i] * state[i] * self.capital * self.rate_capital 
         

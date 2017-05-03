@@ -85,17 +85,11 @@ def Merge(input_list, dim_list, out_dim, f,variables):
     b = variables[i]
     return f(sum_+b)
     
-"""
-u_tm1 : action at time t-1
-u_t : action at time t
-z_t : value of derivative at time t
-c : cost
-"""
-def d(u_tm1, u_t, z_t, c):
-    #u_tm1 * z_t : gain at time t (you use action in precedence, because the agent decide now based on what saw before)
-    #c * |u_t - u_tm1| is the cost of change action
+def rewardFunction(old_action, action, stockPriceDerivate, stockCost):
+    #old_action * stockPriceDerivate : gain at time t (you use action in precedence, because the agent decide now based on what saw before)
+    #stockCost * |action - old_action| is the cost of change action
     #divided by 2 because of a correction
-    return u_tm1 * z_t - c * tf.abs(u_t-u_tm1) / 2.
+    return old_action * stockPriceDerivate - stockCost * tf.abs(action - old_action) / 2.
     
 class LSTMNet(Optimizer):
     
@@ -165,19 +159,19 @@ class LSTMNet(Optimizer):
         reward = []
         
         #Stock price derivative
-        Z = []
+        StockPriceDerivates = []
         for _ in range(serie_length):
-            Z.append(tf.placeholder("float", [None,n_series]))
+            StockPriceDerivates.append(tf.placeholder("float", [None,n_series]))
         
         #Stock cost
-        C = []
+        StockCosts = []
         for _ in range(serie_length):
-            C.append(tf.placeholder("float", [None,n_series]))
+            StockCosts.append(tf.placeholder("float", [None,n_series]))
                     
         #Features
-        F = []
+        Features = []
         for _ in range(serie_length):
-            F.append(tf.placeholder("float", [None,features]))
+            Features.append(tf.placeholder("float", [None,features]))
         
         # unfold through time
         for t in xrange(serie_length):
@@ -188,7 +182,8 @@ class LSTMNet(Optimizer):
             
             print "Unfold: ", t+1, "out of", serie_length
             self.inputShared1_var = []
-            inputShared1 = Merge([self.norm_prices(Z[t]),self.norm_costs(C[t]),self.norm_features(F[t])],[n_series,n_series,features],n_series*2 + features,tf.tanh,self.inputShared1_var)
+            inputShared1 = Merge([self.norm_prices(StockPriceDerivates[t]),self.norm_costs(StockCosts[t]),self.norm_features(Features[t])]
+                                 ,[n_series,n_series,features],n_series*2 + features,tf.tanh,self.inputShared1_var)
             
             self.sharedBlock1_var = []
             # Shared block 1: elaboration of the input
@@ -216,12 +211,13 @@ class LSTMNet(Optimizer):
             #LSTM cells
             lstm, lstm_out = Lstm(block1, block2, block3, block4, lstm)
             self.outerBlock_var = []
-            outerBlock = Block(lstm_out, self.nLSTMCells, [self.decisionBlockShape[1]] * self.decisionBlockShape[0] + [n_series], tf.tanh, self.outerBlock_var, dropout=self.dropout)
+            outerBlock = Block(lstm_out, self.nLSTMCells,
+                               [self.decisionBlockShape[1]] * self.decisionBlockShape[0] + [n_series], tf.tanh, self.outerBlock_var, dropout=self.dropout)
             
             out_temp = outerBlock
             out.append(outerBlock)
         
-            reward.append(tf.reduce_sum(d(old_action,out_temp, self.denorm_prices(Z[t]), self.denorm_costs(C[t]))))
+            reward.append(tf.reduce_sum(rewardFunction(old_action, out_temp, self.denorm_prices(StockPriceDerivates[t]), self.denorm_costs(StockCosts[t]))))
             
             old_action = out_temp
     
@@ -233,12 +229,15 @@ class LSTMNet(Optimizer):
         self.optimizer = tf.train.RMSPropOptimizer(learning_rate=0.001).minimize(-r)
         self.tot_reward = r
         self.out = out
-        
-        self.Z = Z
-        self.C = C
-        self.F = F
-        
-        init = tf.initialize_all_variables()
+
+        #self.Z = StockPriceDerivates
+        #self.C = StockCosts
+        #self.F = Features
+        self.StockPriceDerivates = StockPriceDerivates
+        self.StockCosts = StockCosts
+        self.Features = Features
+
+        init = tf.global_variables_initializer()
         self.session = tf.Session()
         self.session.run(init)
         
@@ -252,15 +251,15 @@ class LSTMNet(Optimizer):
         batch_size = self.batch_size
         n_batch = self.train_set.shape[0] / batch_size
         n_series = self.n_series
-        Z , C , F = (self.Z, self.C, self.F)
+        StockPriceDerivates , StockCosts , Features = (self.StockPriceDerivates, self.StockCosts, self.Features)
         
         #-----------TRAIN
         for batch in xrange(n_batch):
             feed_dict = {}
             for i in range(self.serie_length):
-                feed_dict[Z[i]] = self.train_set[batch*batch_size:(batch+1)*batch_size,i,0:n_series]
-                feed_dict[C[i]] = self.train_set[batch*batch_size:(batch+1)*batch_size,i,n_series:n_series*2]
-                feed_dict[F[i]] = self.train_set[batch*batch_size:(batch+1)*batch_size,i,n_series*2:]
+                feed_dict[StockPriceDerivates[i]] = self.train_set[batch*batch_size:(batch+1)*batch_size,i,0:n_series]
+                feed_dict[StockCosts[i]] = self.train_set[batch*batch_size:(batch+1)*batch_size,i,n_series:n_series*2]
+                feed_dict[Features[i]] = self.train_set[batch*batch_size:(batch+1)*batch_size,i,n_series*2:]
                 
             rew, _= self.session.run( [self.tot_reward, self.optimizer],feed_dict=feed_dict)
             n_rew = rew / (batch_size + 0.0)
@@ -269,9 +268,9 @@ class LSTMNet(Optimizer):
         #------------TEST
         feed_dict = {}
         for i in range(self.serie_length):
-            feed_dict[Z[i]] = self.validation_set[:,i,0:n_series]
-            feed_dict[C[i]] = self.validation_set[:,i,n_series:n_series*2]
-            feed_dict[F[i]] = self.validation_set[:,i,n_series*2:]
+            feed_dict[StockPriceDerivates[i]] = self.validation_set[:,i,0:n_series]
+            feed_dict[StockCosts[i]] = self.validation_set[:,i,n_series:n_series*2]
+            feed_dict[Features[i]] = self.validation_set[:,i,n_series*2:]
         rew = self.session.run( [self.tot_reward],feed_dict=feed_dict)
         test_rew = rew[0] /(self.validation_set.shape[0] + 0.0)
         
@@ -283,18 +282,18 @@ class LSTMNet(Optimizer):
         features = self.features
         
         LSTM =  tf.placeholder("float", [None,self.nLSTMCells]) 
-        LSTM_OUT =  tf.placeholder("float", [None,self.nLSTMCells]) 
+        LSTM_OUT =  tf.placeholder("float", [None,self.nLSTMCells])
         
-        Z = tf.placeholder("float", [None,n_series])
+        StockPriceDerivates = tf.placeholder("float", [None,n_series])
         
         #Stock cost
-        C = tf.placeholder("float", [None,n_series])
+        StockCosts = tf.placeholder("float", [None,n_series])
                     
         #Features
-        F = tf.placeholder("float", [None,features])
+        Features = tf.placeholder("float", [None,features])
 
 
-        inputShared1 = Merge([self.norm_prices(Z),self.norm_costs(C),self.norm_features(F)],[n_series,n_series,features],n_series*2 + features,tf.tanh,self.inputShared1_var)
+        inputShared1 = Merge([self.norm_prices(StockPriceDerivates),self.norm_costs(StockCosts),self.norm_features(Features)],[n_series,n_series,features],n_series*2 + features,tf.tanh,self.inputShared1_var)
         
         # Shared block 1: elaboration of the input
         sharedBlock1 = Block(inputShared1, n_series*2 + features , [self.sharedBoxShape[1]]*self.sharedBoxShape[0], tf.tanh, self.sharedBlock1_var , dropout=self.dropout)
@@ -320,17 +319,17 @@ class LSTMNet(Optimizer):
         
         outerBlock = Block(lstm_out, self.nLSTMCells, [self.decisionBlockShape[1]] * self.decisionBlockShape[0] + [n_series], tf.tanh, self.outerBlock_var, dropout=self.dropout)
         
-        return Suggester(outerBlock,lstm, lstm_out, Z, C, F, LSTM, LSTM_OUT, self.nLSTMCells)
+        return Suggester(outerBlock,lstm, lstm_out, StockPriceDerivates, StockCosts, Features, LSTM, LSTM_OUT, self.nLSTMCells)
 
 class Suggester:
     
-    def __init__(self,tf_model, lstm, lstm_out, Z, C, F, LSTM, LSTM_OUT, n_cells):
+    def __init__(self, tf_model, lstm, lstm_out, StockPriceDerivates, StockCosts, Features, LSTM, LSTM_OUT, n_cells):
         self.core = tf_model
         self.lstm = lstm
         self.lstm_out = lstm_out
-        self.Z = Z
-        self.C = C
-        self.F = F
+        self.StockPriceDerivates = StockPriceDerivates
+        self.StockCosts = StockCosts
+        self.Features = Features
         self.LSTM = LSTM
         self.LSTM_OUT = LSTM_OUT
         
@@ -341,11 +340,11 @@ class Suggester:
         self.session = tf.Session()
         self.session.run(init)
         
-    def getActions(self, z, c, f):
+    def getActions(self, stockPriceDerivates, stockCosts, features):
         feed_dict = {}
-        feed_dict[self.Z] = z
-        feed_dict[self.C] = c
-        feed_dict[self.F] = f
+        feed_dict[self.StockPriceDerivates] = stockPriceDerivates
+        feed_dict[self.StockCosts] = stockCosts
+        feed_dict[self.Features] = features
         feed_dict[self.LSTM] = self.lstm_content
         feed_dict[self.LSTM_OUT] = self.lstm_out_content
         out, self.lstm_content, self.lstm_out_content = self.session.run( [self.core, self.lstm, self.lstm_out],feed_dict=feed_dict)
